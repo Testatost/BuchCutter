@@ -17,22 +17,20 @@ BuchCutter bietet eine direkte Vorschau mit interaktiver Bearbeitung:
 
 ## Unterstützte Dateiformate
 
-**Eingabe:**
 - PNG
 - JPG / JPEG
 - BMP
 - TIF / TIFF
 - PDF
 
-**Ausgabe:**
-- JPEG
-- PNG
-- TIFF
-- BMP
-- PDF
+## Verwendung
+### 1. Windows
+Einfach die exe-Datein herunterladen.  --> [Download](https://github.com/Testatost/BuchCutter/raw/refs/heads/main/BuchCutter.exe)
 
-## Installation
+### 1. Linux (getestet auf Linux Mint 22.2)
+Einfach die ausführbare Datei herunterladen. --> [Download](https://github.com/Testatost/BuchCutter/raw/refs/heads/main/BuchCutter)
 
+## Installation (manuell)
 ### 1. Repository klonen
 
 ```bash
@@ -71,8 +69,7 @@ Für ausgewählte Einträge kann zwischen folgenden Modi umgeschaltet werden:
 
 Farbig (RGB)
 Grau (S/W)
-
-Zusätzlich kann ein Kontrastmodus aktiviert werden.
+Kontrast
 
 ## Verarbeitung
 Einmal bearbeiten verarbeitet nur den aktuell ausgewählten Eintrag
@@ -80,7 +77,7 @@ Alle bearbeiten verarbeitet alle aktivierten Einträge
 Stopp bricht eine laufende Stapelverarbeitung ab
 Ausgabeordner
 
-Wenn kein Speicherordner gewählt wurde, speichert BuchCutter standardmäßig im Ordner der Quelldatei.
+Wenn kein Speicherordner gewählt wurde, speichert BuchCutter standardmäßig im Ordner der Quelldatei in einem neuen Ordner.
 
 Die Ausgaben werden in Unterordnern organisiert:
 
