@@ -1,46 +1,102 @@
-# Bild-Crop-Trenner
-Ein kleines Programm zum Bearbeiten von einzelnen und mehreren Bildern. Dazu zählen das Zuschneiden (Croppen) und Trennen.
+# BuchCutter
 
-![alt text](https://github.com/Testatost/Bild-Crop-Trenner/blob/main/Bild-Crop-Trenner-Bild.png?raw=true)
+![alt text](https://github.com/Testatost/BuchCutter/blob/main/Programm-Screenshot.png?raw=true)
 
-## ✨ Funktionen
+**BuchCutter** ist ein Desktop-Tool zum Zuschneiden und Aufteilen von Buchseiten, Scans, Bildern und PDF-Seiten.  
 
-- 🎯 **Manueller Crop-Bereich**
-  - Zuschneiden durch Ziehen mit der Maus  
-- 🤖 **Smart-Crop (Auto-Crop mit OpenCV)**
-  - Erkennt den gleichen Ausschnitt auf Folge-Bildern automatisch  
-- ✂️ **Trennbalken (Separatoren)**
-  - Frei positionierbar, drehbar (+90°-Button, Reset-Button, Winkelanzeige)  
-- 🧩 **Mehrbild-Verarbeitung**
-  - Lade viele Bilder (auch per Drag & Drop)
-  - Individuell wählbar, ob jedes Bild nur gecroppt oder zusätzlich getrennt wird  
-- 💾 **Mehrformat-Export**
-  - Speicherung gleichzeitig in **JPEG, PNG, TIFF, BMP und PDF**  
-- ⏱️ **Fortschrittsanzeige & Stopp-Funktion**
-  - Für lange Batch-Prozesse  
-- 🖱️ **Zoom & Maussteuerung**
-  - Zoom per Mausrad, Crop verschiebbar, ESC & DEL-Shortcuts  
 
-🪟 Bedienung
+## Vorschau
 
-1. Bilder laden → Button „Bilder laden“ oder per Drag & Drop in die Liste - Hier entscheiden, ob gecropped oder getrennt werden soll.
+BuchCutter bietet eine direkte Vorschau mit interaktiver Bearbeitung:
 
-2. Crop-Bereich aktivieren → Schalter „Crop-Bereich“
+- Crop-Rahmen mit Ziehpunkten
+- verschiebbarer und drehbarer Trennbalken
+- Zoom per Mausrad
+- Navigation zwischen geladenen Seiten
+- Verarbeitung einzelner oder aller Einträge
 
-3. Trennbalken aktivieren → Schalter „Trennbalken“, dann per Maus drehen/verschieben
+## Unterstützte Dateiformate
 
-4. Formate auswählen → Menü „Formate“
+**Eingabe:**
+- PNG
+- JPG / JPEG
+- BMP
+- TIF / TIFF
+- PDF
 
-5. Zielordner wählen → Button „Zielordner“
+**Ausgabe:**
+- JPEG
+- PNG
+- TIFF
+- BMP
+- PDF
 
-🪟 Verarbeiten
+## Installation
 
-1. „Einmal bearbeiten“ → aktuelles Bild
+### 1. Repository klonen
 
-2. „Alle bearbeiten“ → gesamte Liste
+```bash
+git clone <https://github.com/Testatost/Bild-Crop-Trenner.git>
+cd BuchCutter
+```
 
-3. "Smart-Crop (experimental)" erkennt leichte Verschiebungen zwischen den Bildern - ACHTUNG: funktioniert nicht immer!
+### 2. Requirements
+```bash
+pip install pyside6 pillow pymupdf
+```
 
-_________________________________________________________
+### Bedienung
+Dateien laden
 
+Über „Bilder / PDFs laden“ können Bilder oder PDFs importiert werden.
+PDFs werden automatisch in einzelne Seiten aufgeteilt und als separate Einträge angezeigt.
+
+## Crop-Bereich
+
+Mit „Crop-Bereich“ kann ein Zuschneidebereich aktiviert werden.
+Dieser lässt sich direkt in der Vorschau aufziehen, verschieben und anpassen.
+
+## Trennbalken
+
+Mit „Trennbalken“ kann eine Seite in mehrere Teile zerlegt werden.
+Das ist besonders praktisch für Buchseiten mit zwei Textspalten oder getrennten Inhaltsbereichen.
+
+## Smart Split
+
+Wenn „Smart Split“ aktiviert ist, versucht BuchCutter, den Trennbalken automatisch an einer passenden inhaltlichen Trennlinie auszurichten.
+
+## Farbmodus
+
+Für ausgewählte Einträge kann zwischen folgenden Modi umgeschaltet werden:
+
+Farbig (RGB)
+Grau (S/W)
+
+Zusätzlich kann ein Kontrastmodus aktiviert werden.
+
+## Verarbeitung
+Einmal bearbeiten verarbeitet nur den aktuell ausgewählten Eintrag
+Alle bearbeiten verarbeitet alle aktivierten Einträge
+Stopp bricht eine laufende Stapelverarbeitung ab
+Ausgabeordner
+
+Wenn kein Speicherordner gewählt wurde, speichert BuchCutter standardmäßig im Ordner der Quelldatei.
+
+Die Ausgaben werden in Unterordnern organisiert:
+
+Crop-Ordner/
+Trenn-Ordner/
+
+Innerhalb dieser Ordner werden die Dateien zusätzlich nach Ausgabeformat sortiert.
+
+### Projektstruktur
+```bash
+BuchCutter/
+├── main.py
+├── logo.png
+├── icon.ico
+├── README.md
+└── ...
+```
+________________________________
 Disclaimer: Das Programm wurde unteranderem m.H. von ChatGPT 5 bearbeitet.
