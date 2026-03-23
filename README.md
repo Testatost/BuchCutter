@@ -89,14 +89,5 @@ Trenn-Ordner/
 
 Innerhalb dieser Ordner werden die Dateien zusätzlich nach Ausgabeformat sortiert.
 
-### Projektstruktur
-```bash
-BuchCutter/
-├── main.py
-├── logo.png
-├── icon.ico
-├── README.md
-└── ...
-```
 ________________________________
 Disclaimer: Das Programm wurde unteranderem m.H. von ChatGPT 5 bearbeitet.
