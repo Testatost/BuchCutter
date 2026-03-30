@@ -2,14 +2,17 @@ import os
 import re
 import sys
 import math
+import ctypes
+import tempfile
+import time
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import fitz  # PyMuPDF
-from PIL import Image, ImageDraw, ImageQt, ImageOps, ImageEnhance, ImageFilter
+from PIL import Image, ImageDraw, ImageOps, ImageEnhance, ImageFilter, ImageQt
 
 from PySide6.QtCore import Qt, QRectF, QPointF, Signal, QObject, QRunnable, QThreadPool
-from PySide6.QtGui import QAction, QColor, QPainter, QPen, QPixmap, QPalette
+from PySide6.QtGui import QAction, QColor, QPainter, QPen, QPixmap, QPalette, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFileDialog, QMessageBox, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QSplitter, QTableWidget, QTableWidgetItem, QHeaderView,
@@ -17,13 +20,15 @@ from PySide6.QtWidgets import (
     QFrame
 )
 
-
 # =========================================================
 # Utilities
 # =========================================================
 
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".pdf"}
 
+def resource_path(relative_path: str) -> str:
+    base_path = getattr(sys, "_MEIPASS", os.path.abspath("."))
+    return os.path.join(base_path, relative_path)
 
 def polygon_area(poly: List[Tuple[float, float]]) -> float:
     if not poly or len(poly) < 3:
@@ -34,7 +39,6 @@ def polygon_area(poly: List[Tuple[float, float]]) -> float:
         x2, y2 = poly[(i + 1) % len(poly)]
         area += x1 * y2 - x2 * y1
     return abs(area) * 0.5
-
 
 def clip_polygon_halfplane(polygon, a, b, c):
     if not polygon:
@@ -69,30 +73,30 @@ def clip_polygon_halfplane(polygon, a, b, c):
         S = E
     return output
 
-
 def pil_to_qpixmap(img: Image.Image) -> QPixmap:
     if img.mode not in ("RGB", "RGBA"):
         img = img.convert("RGBA")
     qimage = ImageQt.ImageQt(img)
     return QPixmap.fromImage(qimage)
 
-
-def render_pdf_page_to_pil(pdf_path: str, page_index: int, zoom: float = 2.0) -> Image.Image:
+def render_pdf_page_to_pil(pdf_path: str, page_index: int, dpi: int = 300) -> Image.Image:
     doc = fitz.open(pdf_path)
     try:
         page = doc.load_page(page_index)
+        zoom = dpi / 72.0
         mat = fitz.Matrix(zoom, zoom)
         pix = page.get_pixmap(matrix=mat, alpha=False)
         return Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
     finally:
         doc.close()
 
+PREVIEW_PDF_DPI = 144
+EXPORT_PDF_DPI = 300
 
-def load_image_or_pdf_page(path: str, page_index: Optional[int] = None) -> Image.Image:
+def load_image_or_pdf_page(path: str, page_index: Optional[int] = None, pdf_dpi: int = EXPORT_PDF_DPI) -> Image.Image:
     if page_index is None:
         return Image.open(path).convert("RGB")
-    return render_pdf_page_to_pil(path, page_index, zoom=2.0)
-
+    return render_pdf_page_to_pil(path, page_index, dpi=pdf_dpi)
 
 def normalize_dropped_paths(raw_list: List[str]) -> List[str]:
     cleaned = []
@@ -101,7 +105,6 @@ def normalize_dropped_paths(raw_list: List[str]) -> List[str]:
         if p:
             cleaned.append(p)
     return cleaned
-
 
 # =========================================================
 # Data models
@@ -115,8 +118,9 @@ class ItemState:
     selected: bool = False
     crop_enabled: bool = False
     split_enabled: bool = False
-    color_mode: str = "RGB"   # "RGB" oder "GRAY"
+    color_mode: str = "RGB"  # "RGB" oder "GRAY"
     contrast_enabled: bool = False
+    rotation_angle: float = 0.0
 
     def unique_key(self) -> str:
         if self.page_index is None:
@@ -274,6 +278,7 @@ class BatchWorker(QRunnable):
         except Exception as e:
             self.signals.error.emit(str(e))
 
+
 class PersistentCheckMenu(QMenu):
     def mouseReleaseEvent(self, event):
         action = self.activeAction()
@@ -317,6 +322,19 @@ class EditorCanvas(QWidget):
         self.rect_before = None
         self.sep_offset = QPointF()
 
+        self.rotation_mode = False
+        self.show_grid = False
+
+        # final gespeicherter Winkel
+        self.rotation_angle = 0.0
+
+        # nur für flüssige Live-Vorschau während des Draggens
+        self.preview_rotation_angle = 0.0
+        self.is_preview_rotating = False
+
+        self.rotation_start_angle = 0.0
+        self.rotation_start_mouse_angle = 0.0
+
     # -------------------------
     # Drag & Drop
     # -------------------------
@@ -342,9 +360,10 @@ class EditorCanvas(QWidget):
     # Image management
     # -------------------------
 
-    def set_image(self, img: Optional[Image.Image]):
+    def set_image(self, img: Optional[Image.Image], reset_zoom: bool = True):
         self.base_image = img
-        self.zoom = 1.0
+        if reset_zoom:
+            self.zoom = 1.0
         self._update_view_image()
         if self.view_image and self.show_crop and self.crop_rect is None:
             self.create_default_crop()
@@ -446,6 +465,14 @@ class EditorCanvas(QWidget):
                 best_d = d
         return best
 
+    def _mouse_angle_from_center(self, p: QPointF) -> float:
+        if self.view_image is None:
+            return 0.0
+        w, h = self.view_image.size
+        cx = w / 2.0
+        cy = h / 2.0
+        return math.degrees(math.atan2(p.y() - cy, p.x() - cx))
+
     # -------------------------
     # Painting
     # -------------------------
@@ -459,7 +486,27 @@ class EditorCanvas(QWidget):
             painter.drawText(self.rect(), Qt.AlignCenter, "Bilder oder PDFs hier hineinziehen oder laden")
             return
 
-        painter.drawPixmap(0, 0, self.view_pixmap)
+        angle = self.preview_rotation_angle if self.is_preview_rotating else 0.0
+
+        if abs(angle) > 0.01:
+            painter.save()
+
+            w = self.view_pixmap.width()
+            h = self.view_pixmap.height()
+            cx = w / 2.0
+            cy = h / 2.0
+
+            painter.translate(cx, cy)
+            painter.rotate(angle)
+            painter.translate(-cx, -cy)
+            painter.drawPixmap(0, 0, self.view_pixmap)
+
+            painter.restore()
+        else:
+            painter.drawPixmap(0, 0, self.view_pixmap)
+
+        if self.show_grid:
+            self._paint_grid(painter)
 
         if self.show_crop and self.crop_rect is not None:
             self._paint_crop(painter)
@@ -543,6 +590,32 @@ class EditorCanvas(QWidget):
         painter.setPen(QColor("#111"))
         painter.drawText(angle_box, Qt.AlignCenter, f"{self.separator.angle_deg():.1f}°")
 
+    def _paint_grid(self, painter: QPainter):
+        canvas_w = self.width()
+        canvas_h = self.height()
+
+        if canvas_w <= 1 or canvas_h <= 1:
+            return
+
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, False)
+
+        pen = QPen(QColor(0, 0, 0, 110), 1)
+        pen.setCosmetic(True)
+        painter.setPen(pen)
+
+        cells = 14  # kleineres Raster als 5x5
+
+        for i in range(1, cells):
+            x = int(round(canvas_w * i / cells))
+            painter.drawLine(x, 0, x, canvas_h)
+
+        for i in range(1, cells):
+            y = int(round(canvas_h * i / cells))
+            painter.drawLine(0, y, canvas_w, y)
+
+        painter.restore()
+
     # -------------------------
     # Hit tests
     # -------------------------
@@ -607,6 +680,15 @@ class EditorCanvas(QWidget):
 
         p = event.position()
 
+        if self.rotation_mode:
+            self.drag_mode = "img_rotate"
+            self.rotation_start_angle = self.rotation_angle
+            self.rotation_start_mouse_angle = self._mouse_angle_from_center(p)
+            self.preview_rotation_angle = 0.0
+            self.is_preview_rotating = True
+            self.setCursor(Qt.ClosedHandCursor)
+            return
+
         if self.show_separator and self.separator is not None:
             hit = self._separator_hit(p)
             if hit is not None:
@@ -658,6 +740,19 @@ class EditorCanvas(QWidget):
 
     def mouseMoveEvent(self, event):
         p = event.position()
+
+        if self.drag_mode == "img_rotate":
+            current_mouse_angle = self._mouse_angle_from_center(p)
+            delta = current_mouse_angle - self.rotation_start_mouse_angle
+            new_angle = self.rotation_start_angle + delta
+
+            if event.modifiers() & Qt.ControlModifier:
+                step = 1.0
+                new_angle = round(new_angle / step) * step
+
+            self.preview_rotation_angle = new_angle - self.rotation_angle
+            self.update()
+            return
 
         if self.drag_mode == "sep_top" and self.separator and self.view_image is not None:
             w, h = self.view_image.size
@@ -741,9 +836,16 @@ class EditorCanvas(QWidget):
         self._update_cursor(p)
 
     def mouseReleaseEvent(self, event):
+        if self.drag_mode == "img_rotate":
+            self.rotation_angle = self.rotation_angle + self.preview_rotation_angle
+            self.preview_rotation_angle = 0.0
+            self.is_preview_rotating = False
+
         self.drag_mode = None
         self.rect_before = None
         self.sep_offset = QPointF()
+        self._update_cursor(event.position())
+        self.update()
         self.changed.emit()
 
     def wheelEvent(self, event):
@@ -778,6 +880,10 @@ class EditorCanvas(QWidget):
         return QRectF(x1, y1, x2 - x1, y2 - y1)
 
     def _update_cursor(self, p: QPointF):
+        if self.rotation_mode:
+            self.setCursor(Qt.OpenHandCursor)
+            return
+
         if self.show_separator and self.separator is not None:
             hit = self._separator_hit(p)
             if hit in ("rotate", "top", "bottom", "line"):
@@ -815,6 +921,10 @@ class MainWindow(QMainWindow):
         self.resize(1500, 900)
         self.setAcceptDrops(True)
 
+        icon_path = resource_path("icon.ico")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+
         self.items: List[ItemState] = []
         self.current_index = -1
         self.output_folder = ""
@@ -846,7 +956,7 @@ class MainWindow(QMainWindow):
         return (0, 0, img.size[0], img.size[1])
 
     def get_preview_image_for_item(self, item: ItemState) -> Image.Image:
-        img = load_image_or_pdf_page(item.source_path, item.page_index)
+        img = load_image_or_pdf_page(item.source_path, item.page_index, pdf_dpi=PREVIEW_PDF_DPI)
         img = self.apply_item_image_options(img, item)
         return img
 
@@ -896,13 +1006,27 @@ class MainWindow(QMainWindow):
         btn_out.clicked.connect(self.select_output_folder)
         tl.addWidget(btn_out)
 
-        btn_prev = QPushButton("Vorheriges")
-        btn_prev.clicked.connect(self.prev_item)
-        tl.addWidget(btn_prev)
+        self.btn_rotate_mode = QPushButton("Rotation: AUS")
+        self.btn_rotate_mode.setCheckable(True)
+        self.btn_rotate_mode.toggled.connect(self.toggle_rotation_mode)
+        tl.addWidget(self.btn_rotate_mode)
 
-        btn_next = QPushButton("Nächstes")
-        btn_next.clicked.connect(self.next_item)
-        tl.addWidget(btn_next)
+        self.btn_grid = QPushButton("Raster")
+        self.btn_grid.setCheckable(True)
+        self.btn_grid.toggled.connect(self.toggle_grid)
+        tl.addWidget(self.btn_grid)
+
+        btn_rot_left = QPushButton("↺ 90°")
+        btn_rot_left.clicked.connect(lambda: self.rotate_current_by(-90))
+        tl.addWidget(btn_rot_left)
+
+        btn_rot_right = QPushButton("↻ 90°")
+        btn_rot_right.clicked.connect(lambda: self.rotate_current_by(90))
+        tl.addWidget(btn_rot_right)
+
+        btn_rot_reset = QPushButton("Rotation Reset")
+        btn_rot_reset.clicked.connect(self.reset_current_rotation)
+        tl.addWidget(btn_rot_reset)
 
         self.chk_show_crop = QCheckBox("Crop-Bereich")
         self.chk_show_crop.stateChanged.connect(self.toggle_crop)
@@ -1005,9 +1129,12 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().sectionClicked.connect(self.on_header_clicked)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.itemSelectionChanged.connect(self.on_table_selection_changed)
         self.table.itemChanged.connect(self.on_table_item_changed)
+
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_table_context_menu)
         self.table.verticalHeader().setVisible(False)
         self.table.setColumnWidth(0, 34)
         self.table.setColumnWidth(1, 34)
@@ -1034,6 +1161,18 @@ class MainWindow(QMainWindow):
         self.progress = QProgressBar()
         self.progress.setValue(0)
         root.addWidget(self.progress)
+
+        self.act_paste = QAction("Einfügen", self)
+        self.act_paste.setShortcut(QKeySequence("Ctrl+V"))
+        self.act_paste.setShortcutContext(Qt.ApplicationShortcut)
+        self.act_paste.triggered.connect(self.paste_from_clipboard)
+        self.addAction(self.act_paste)
+
+        self.act_delete = QAction("Löschen", self)
+        self.act_delete.setShortcut(QKeySequence(Qt.Key_Delete))
+        self.act_delete.setShortcutContext(Qt.ApplicationShortcut)
+        self.act_delete.triggered.connect(self.delete_marked_or_selected_items)
+        self.addAction(self.act_delete)
 
     def apply_dark_theme(self):
         app = QApplication.instance()
@@ -1145,7 +1284,7 @@ class MainWindow(QMainWindow):
             background: transparent;
             border: none;
         }
-        
+
         #ThemeIcon {
             font-size: 18px;
             color: #ffd54a;
@@ -1268,7 +1407,7 @@ class MainWindow(QMainWindow):
             background: transparent;
             border: none;
         }
-        
+
         #ThemeIcon {
             font-size: 18px;
             color: #d89b00;
@@ -1387,6 +1526,115 @@ class MainWindow(QMainWindow):
         self.canvas.update()
         self.progress.setValue(0)
 
+    def paste_from_clipboard(self):
+        clipboard = QApplication.clipboard()
+        mime = clipboard.mimeData()
+
+        paths = []
+
+        # Fall 1: kopierte Dateien
+        if mime and mime.hasUrls():
+            for url in mime.urls():
+                if url.isLocalFile():
+                    path = url.toLocalFile()
+                    ext = os.path.splitext(path)[1].lower()
+                    if ext in SUPPORTED_EXTENSIONS and os.path.isfile(path):
+                        paths.append(path)
+
+        # Fall 2: Text mit Dateipfaden
+        elif mime and mime.hasText():
+            raw_text = mime.text().strip()
+            if raw_text:
+                for line in raw_text.splitlines():
+                    path = line.strip().strip('"').strip("'")
+                    ext = os.path.splitext(path)[1].lower()
+                    if os.path.isfile(path) and ext in SUPPORTED_EXTENSIONS:
+                        paths.append(path)
+
+        # Fall 3: Bild direkt aus Zwischenablage
+        elif mime and mime.hasImage():
+            image = clipboard.image()
+            if not image.isNull():
+                temp_dir = os.path.join(tempfile.gettempdir(), "BuchCutter_clipboard")
+                os.makedirs(temp_dir, exist_ok=True)
+
+                filename = f"clipboard_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.png"
+                out_path = os.path.join(temp_dir, filename)
+
+                if image.save(out_path, "PNG"):
+                    paths.append(out_path)
+
+        if not paths:
+            QMessageBox.information(
+                self,
+                "Zwischenablage",
+                "Es wurden keine unterstützten Bilder oder PDFs in der Zwischenablage gefunden."
+            )
+            return
+
+        self.add_paths(paths)
+
+    def get_rows_for_deletion(self):
+        # 1) Vorrang: Checkboxen in Spalte "☑"
+        checked_rows = [i for i, item in enumerate(self.items) if item.selected]
+        if checked_rows:
+            return sorted(set(checked_rows))
+
+        # 2) Sonst: markierte Tabellenzeilen
+        selection_model = self.table.selectionModel()
+        if selection_model is not None:
+            selected_rows = [idx.row() for idx in selection_model.selectedRows()]
+            if selected_rows:
+                return sorted(set(selected_rows))
+
+        # 3) Fallback: aktueller Eintrag
+        if 0 <= self.current_index < len(self.items):
+            return [self.current_index]
+
+        return []
+
+    def delete_marked_or_selected_items(self):
+        rows = self.get_rows_for_deletion()
+        if not rows:
+            return
+
+        new_index = min(rows[0], len(self.items) - len(rows) - 1)
+        if new_index < 0:
+            new_index = -1
+
+        for row in sorted(rows, reverse=True):
+            if 0 <= row < len(self.items):
+                del self.items[row]
+
+        if not self.items:
+            self.current_index = -1
+            self.current_crop_orig = None
+            self.refresh_table()
+            self.canvas.set_image(None)
+            self.canvas.crop_rect = None
+            self.canvas.separator = None
+            self.canvas.update()
+            return
+
+        self.current_index = min(max(new_index, 0), len(self.items) - 1)
+        self.current_crop_orig = None
+        self.refresh_table()
+        self.select_current_row()
+        self.load_current_item()
+
+    def show_table_context_menu(self, pos):
+        item = self.table.itemAt(pos)
+
+        # Nur wenn aktuell nichts selektiert ist, selektieren wir die Rechtsklick-Zeile
+        if item is not None and not self.table.selectionModel().selectedRows():
+            self.table.selectRow(item.row())
+
+        menu = QMenu(self)
+        delete_action = menu.addAction("Löschen")
+        chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+
+        if chosen == delete_action:
+            self.delete_marked_or_selected_items()
     # -------------------------
     # Table
     # -------------------------
@@ -1451,6 +1699,7 @@ class MainWindow(QMainWindow):
                 tooltip += " | Kontrast: an"
             else:
                 tooltip += " | Kontrast: aus"
+            tooltip += f" | Rotation: {item.rotation_angle:.1f}°"
             name_item.setToolTip(tooltip)
             self.table.setItem(row, 2, name_item)
 
@@ -1538,7 +1787,10 @@ class MainWindow(QMainWindow):
         rows = self.table.selectionModel().selectedRows()
         if not rows:
             return
-        self.current_index = rows[0].row()
+
+        # Für die Vorschau immer die erste selektierte Zeile verwenden
+        row_indices = sorted(idx.row() for idx in rows)
+        self.current_index = row_indices[0]
         self.load_current_item()
 
     def select_current_row(self):
@@ -1549,29 +1801,19 @@ class MainWindow(QMainWindow):
     # Navigation
     # -------------------------
 
-    def prev_item(self):
-        if not self.items:
-            return
-        self.current_index = (self.current_index - 1) % len(self.items)
-        self.select_current_row()
-        self.load_current_item()
-
-    def next_item(self):
-        if not self.items:
-            return
-        self.current_index = (self.current_index + 1) % len(self.items)
-        self.select_current_row()
-        self.load_current_item()
-
     def load_current_item(self):
         if not (0 <= self.current_index < len(self.items)):
             return
 
         item = self.items[self.current_index]
         try:
+            self.canvas.rotation_angle = item.rotation_angle
             img = self.get_preview_image_for_item(item)
-            self.canvas.set_image(img)
-            self.setWindowTitle(f"BuchCutter - {item.display_name}")
+
+            reset_zoom = self.canvas.base_image is None
+            self.canvas.set_image(img, reset_zoom=reset_zoom)
+
+            self.setWindowTitle(f"BuchCutter - {item.display_name} | Rotation: {item.rotation_angle:.1f}°")
         except Exception as e:
             QMessageBox.critical(self, "Ladefehler", f"Datei konnte nicht geladen werden:\n\n{e}")
 
@@ -1580,6 +1822,20 @@ class MainWindow(QMainWindow):
     # -------------------------
 
     def sync_from_canvas(self):
+        if not (0 <= self.current_index < len(self.items)):
+            self.current_crop_orig = self.canvas.get_crop_orig()
+            return
+
+        item = self.items[self.current_index]
+        new_angle = self.canvas.rotation_angle
+
+        if abs(item.rotation_angle - new_angle) > 0.01:
+            item.rotation_angle = new_angle
+            self.current_crop_orig = None
+            self.canvas.crop_rect = None
+            self.load_current_item()
+            return
+
         self.current_crop_orig = self.canvas.get_crop_orig()
 
     def toggle_crop(self):
@@ -1596,6 +1852,35 @@ class MainWindow(QMainWindow):
         if not self.canvas.show_separator:
             self.canvas.separator = None
         self.canvas.update()
+
+    def toggle_rotation_mode(self, checked):
+        self.canvas.rotation_mode = checked
+        self.btn_rotate_mode.setText("Rotation: AN" if checked else "Rotation: AUS")
+        self.canvas.update()
+
+    def toggle_grid(self, checked):
+        self.canvas.show_grid = checked
+        self.canvas.update()
+
+    def rotate_current_by(self, delta_degrees):
+        if not (0 <= self.current_index < len(self.items)):
+            return
+
+        item = self.items[self.current_index]
+        item.rotation_angle = (item.rotation_angle + delta_degrees) % 360.0
+        self.canvas.rotation_angle = item.rotation_angle
+        self.current_crop_orig = None
+        self.load_current_item()
+
+    def reset_current_rotation(self):
+        if not (0 <= self.current_index < len(self.items)):
+            return
+
+        item = self.items[self.current_index]
+        item.rotation_angle = 0.0
+        self.canvas.rotation_angle = 0.0
+        self.current_crop_orig = None
+        self.load_current_item()
 
     def _set_format(self, name: str, checked: bool):
         self.save_formats[name] = checked
@@ -1658,9 +1943,10 @@ class MainWindow(QMainWindow):
         self.stop_requested = True
 
     def process_item(self, item: ItemState) -> List[str]:
-        img = load_image_or_pdf_page(item.source_path, item.page_index)
-        crop_area = self.get_effective_crop_area(item, img)
+        img = load_image_or_pdf_page(item.source_path, item.page_index, pdf_dpi=EXPORT_PDF_DPI)
+        img = self.apply_item_image_options(img, item)
 
+        crop_area = self.get_effective_crop_area(item, img)
         line_segments = self.get_separator_lines_for_processing(img, crop_area)
         segments = self.compute_segments_for_crop(crop_area, line_segments) if item.split_enabled else []
 
@@ -1855,7 +2141,18 @@ class MainWindow(QMainWindow):
             out = ImageEnhance.Contrast(out).enhance(2.2)
             out = ImageEnhance.Sharpness(out).enhance(1.4)
 
+        if abs(item.rotation_angle) > 0.01:
+            if out.mode not in ("RGB", "RGBA"):
+                out = out.convert("RGB")
+            out = out.rotate(
+                -item.rotation_angle,
+                expand=True,
+                resample=Image.BICUBIC,
+                fillcolor="white"
+            )
+
         return out
+
     # -------------------------
     # Saving
     # -------------------------
@@ -1878,7 +2175,6 @@ class MainWindow(QMainWindow):
 
         ox1, oy1, ox2, oy2 = crop_area
         crop = img.crop((ox1, oy1, ox2, oy2))
-        crop = self.apply_item_image_options(crop, item)
 
         root_outdir = self.output_folder or os.path.dirname(item.source_path)
         os.makedirs(root_outdir, exist_ok=True)
@@ -1913,7 +2209,9 @@ class MainWindow(QMainWindow):
                 fmt_dir = os.path.join(crop_dir, fmt)
                 os.makedirs(fmt_dir, exist_ok=True)
                 outpath = os.path.join(fmt_dir, f"{base_name}_crop_edit_{n}.{ext}")
+
                 self._save_pil(crop, outpath, fmt)
+
                 saved_files.append(outpath)
 
         if separators_active:
@@ -1955,7 +2253,9 @@ class MainWindow(QMainWindow):
                     fmt_dir = os.path.join(split_dir, fmt)
                     os.makedirs(fmt_dir, exist_ok=True)
                     outpath = os.path.join(fmt_dir, f"{base_name}_teil_{current_index}.{ext}")
+
                     self._save_pil(segment_img, outpath, fmt)
+
                     saved_files.append(outpath)
 
                 current_index += 1
@@ -1963,26 +2263,39 @@ class MainWindow(QMainWindow):
         return saved_files
 
     def _save_pil(self, img: Image.Image, outpath: str, fmt: str):
+        dpi = (300, 300)
+
         if fmt == "PDF":
             bg = Image.new("RGB", img.size, (255, 255, 255))
             if img.mode == "RGBA":
                 bg.paste(img, (0, 0), img.split()[-1])
             else:
-                bg.paste(img)
-            bg.save(outpath, format="PDF")
+                bg.paste(img.convert("RGB"))
+            bg.save(outpath, format="PDF", resolution=300.0)
+
         elif fmt == "PNG":
             if img.mode != "RGBA":
                 img = img.convert("RGBA")
-            img.save(outpath, format="PNG")
+            img.save(outpath, format="PNG", dpi=dpi)
+
         elif fmt in ("JPEG", "BMP", "TIFF"):
             bg = Image.new("RGB", img.size, (255, 255, 255))
             if img.mode == "RGBA":
                 bg.paste(img, (0, 0), img.split()[-1])
             else:
                 bg.paste(img.convert("RGB"))
-            bg.save(outpath, format=fmt)
+
+            if fmt == "JPEG":
+                bg.save(outpath, format=fmt, quality=95, dpi=dpi, subsampling=0)
+            elif fmt == "TIFF":
+                bg.save(outpath, format=fmt, dpi=dpi)
+            elif fmt == "BMP":
+                bg.save(outpath, format=fmt)
+            else:
+                bg.save(outpath, format=fmt, dpi=dpi)
+
         else:
-            img.save(outpath)
+            img.save(outpath, dpi=dpi)
 
     def _next_global_split_index(self, folder: str) -> int:
         max_n = 0
@@ -2013,8 +2326,27 @@ class MainWindow(QMainWindow):
 # =========================================================
 
 def main():
+    if sys.platform.startswith("win"):
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("buchcutter.app")
+        except Exception:
+            pass
+
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.Round
+    )
+
     app = QApplication(sys.argv)
+
+    icon_path = resource_path("icon.ico")
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
+
     win = MainWindow()
+
+    if os.path.exists(icon_path):
+        win.setWindowIcon(QIcon(icon_path))
+
     win.showMaximized()
     sys.exit(app.exec())
 
